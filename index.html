@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+        
+<!-- Load d3.js -->
+<script src="https://d3js.org/d3.v6.js"></script>
+        
+<head>
+    <title>EM example</title>
+</head>
+
+<body>
+    <div id="my_dataviz"></div>
+    <input type="button" id="Reroll", value="Reroll">
+    <input type="button" id="Initialize", value="Initialize">
+    <input type="button" id="EMstep", value="EMstep">
+
+    <h2>Manual</h2>
+    <p>2次元データに対してEMアルゴリズムによる混合正規分布の最尤推定を行います。</p>
+    <p>EMstepボタンを押すと各正規分布の平均と共分散、負担率が更新され、周辺分布の等確率線（青線）が変化します。</p>
+    <ul>
+        <li>左クリック：カーソル位置を中心にデータ点を追加します。</li>
+        <li>右クリック：カーソル位置の座標を平均とする正規分布を追加します。</li>
+        <li>マウスオーバー：カーソル位置の座標とその点の対数尤度を表示します。</li>
+        <li>Reroll：データ点を再生成します。</li>
+        <li>Initialize：各分布のパラメータと個数を初期化します。</li>
+        <li>EMstep：EMアルゴリズムにより各分布のパラメータを1回更新します。</li>
+    </ul>
+</body>
+
+<script>
+    // set the dimensions and margins of the graph
+    const margin = {top: 10, right: 30, bottom: 30, left: 60},
+            width = 560 - margin.left - margin.right,
+            height = 480 - margin.top - margin.bottom;
+        
+    // append the svg object to the body of the page
+    const svg = d3.select("#my_dataviz")
+        .append("svg")
+        .attr("width", width + margin.left + margin.right)
+        .attr("height", height + margin.top + margin.bottom)
+        .append("g")
+        .attr("transform", `translate(${margin.left}, ${margin.top})`);
+
+    const vmax = 8.0, vmin = -8.0
+
+    const xaxis = d3.scaleLinear()
+        .domain([vmin, vmax])
+        .range([ 0, width ]);
+
+    const yaxis = d3.scaleLinear()
+        .domain([vmin, vmax])
+        .range([ height, 0]);
+
+    const xscale = d3.scaleLinear()
+        .domain([0, vmax - vmin])
+        .range([0, width])
+
+    const yscale = d3.scaleLinear()
+        .domain([0, vmax - vmin])
+        .range([0, height])
+
+    const generate = (mu, sigma, num) => {
+        const randomXY = () => {
+            const randomX = d3.randomNormal(mu[0], Math.sqrt(sigma[0]));
+            const randomYcondX = x => {
+                const tau = sigma[2] / Math.sqrt(sigma[0] * sigma[1])
+                const muYX = mu[1] + tau * Math.sqrt(sigma[1]) * (x - mu[0]) / Math.sqrt(sigma[0]);
+                const sigmaYX = sigma[1] * (1 - tau ** 2);
+                return d3.randomNormal(muYX, Math.sqrt(sigmaYX));
+            }
+            const x = randomX();
+            const y = randomYcondX(x)();
+            return [x, y];
+        };
+        return d3.range(num)
+            .map(() => (randomXY()))
+            .filter(d => vmin <= d[0] && d[0] <= vmax && vmin <= d[1] && d[1] <= vmax);
+    };
+
+    const density = (mu, sigma, data) => {
+        const eps = 1e-16
+        const sigmaXY = Math.sqrt(sigma[0] * sigma[1]) + eps
+        const tau = sigma[2] / sigmaXY
+        const Z = 2 * Math.PI * sigmaXY * Math.sqrt(1 - tau ** 2);
+        const xx = Math.pow(data[0] - mu[0], 2) / sigma[0]
+        const yy = Math.pow(data[1] - mu[1], 2) / sigma[1]
+        const xy = 2 * tau * (data[0] - mu[0]) * (data[1] - mu[1]) / sigmaXY
+        return Math.exp(-(xx - xy + yy) / (2 * (1 - tau ** 2 + eps))) / Z
+    }
+
+    const expectation = (mu, sigma, pi, data) => {
+        let respons = data.map((d,i) => 
+            Array.from(Array(mu.length), (v, j) => 
+                pi[j] * density(mu[j], sigma[j], d)
+            )
+        );
+        respons = respons.map(d=>d.map(v=>v/d.reduce((sum,ele)=>sum+ele, 0)))
+        return respons;
+    };
+
+    const maximization = (data, respons) => {
+        const n_sample = data.length;
+        const n_mix = respons[0].length;
+        
+        let respons_sum = respons.reduce((a, b) => a.map((c,j)=>c + b[j]), Array(n_mix).fill(0));
+        let mu_new = Array(n_mix).fill(0).map((zero,k) =>
+            data.reduce((cumsum, d, i) => 
+                cumsum.map((c, j) => c + respons[i][k] * d[j]), [0, 0]));
+        mu_new = mu_new.map((d,i) => d.map(v => v/respons_sum[i]));
+
+        let sigma_new = Array(n_mix).fill(0).map((zero,k) =>
+            data.reduce((cumsum, d, i) => {
+                const x = data[i][0] - mu_new[k][0];
+                const y = data[i][1] - mu_new[k][1];
+                cumsum[0] += respons[i][k] * Math.pow(x, 2);
+                cumsum[1] += respons[i][k] * Math.pow(y, 2);
+                cumsum[2] += respons[i][k] * x * y;
+                return cumsum;
+            }, [0, 0, 0])
+        );
+        sigma_new = sigma_new.map((d, i) => d.map(v => v / respons_sum[i]));
+
+        const pi_new = respons_sum.map(d => d / n_sample);
+        return [mu_new, sigma_new, pi_new];
+    };
+
+    const scatter = (data) => {
+        svg.append("g")
+        .selectAll("dot")
+        .data(data)
+        .join("circle")
+            .attr("cx", d => xaxis(d[0]))
+            .attr("cy", d => yaxis(d[1]))
+            .attr("r", 1.5)
+            .style("fill", "#69b3a2")
+            .attr("class", "sample")
+    };
+
+    const plotNormal = (mu, sigma, pi, c_list) => {
+        svg.selectAll("ellipse").remove();
+        let normals = mu.map((m,i) => {
+            const a_sq = 0.5 * (sigma[i][0] + sigma[i][1] + Math.sqrt(Math.pow(sigma[i][0] - sigma[i][1], 2) + 4 * Math.pow(sigma[i][2],2)));
+            const b_sq = 0.5 * (sigma[i][0] + sigma[i][1] - Math.sqrt(Math.pow(sigma[i][0] - sigma[i][1], 2) + 4 * Math.pow(sigma[i][2],2)));
+            const deg = 90 + (180 / Math.PI) * Math.atan((a_sq-b_sq) / (sigma[i][2] + 1e-16))
+            return { type: "normal" + i.toString(),
+                     x: m[0],
+                     y: m[1],
+                     rx: Math.sqrt(a_sq), 
+                     ry: Math.sqrt(b_sq),
+                     deg: deg
+            };
+        });
+
+        c_list.map(c => {
+            svg.selectAll("ellipses")
+            .data(normals)
+            .enter()
+            .append("ellipse")
+                .attr("cx", d => xaxis(d.x))
+                .attr("cy", d => yaxis(d.y))
+                .attr("rx", d => xscale(c * d.rx))
+                .attr("ry", d => yscale(c * d.ry))
+                .attr("class", d => d.type)
+                .style("fill", "transparent")
+                .style("stroke", "gray")
+                .attr("transform", d => `rotate(${d.deg},${xaxis(d.x)},${yaxis(d.y)})`);
+        });
+    };
+
+    const plotContours = (mu, sigma, pi) => {
+        svg.selectAll(".probability").remove();
+        const [n,m] = [150, 150]
+
+        const grid = d3.range(vmin, vmax, (vmax - vmin) / n).map((x,i) => {
+            return d3.range(vmin, vmax, (vmax - vmin) / m).map(y => [y, x])
+        });
+        const dens_map = grid.flat().map(d => 
+            pi.reduce((sum, pi_i, i) => 
+                sum + pi_i * density(mu[i], sigma[i], d), 0
+            )
+        );
+        const transform = ({ type, value, coordinates }) => {
+            return {
+                type, value,
+                coordinates: coordinates.map(rings => {
+                    return rings.map(points => {
+                        return points.map(([x, y]) => ([ xaxis(x), yaxis(y) ]))
+                    })
+                })
+            }
+        };
+        const stepsize = (d3.max(dens_map) - d3.min(dens_map)) / 15
+        const thresholds = d3.range(d3.min(dens_map), d3.max(dens_map)+stepsize, stepsize)
+                             .map(d => Math.pow(d / d3.max(dens_map), 1.5) * d);
+        const contours = d3.contours()
+        .size([n, m])
+        .thresholds(thresholds)
+        (dens_map).map(transform);
+
+        const color = d3.scaleSequential([d3.min(thresholds), d3.max(thresholds)], d3.interpolateBlues)
+
+        svg.selectAll("path")
+        .data(contours)
+        .enter()
+        .append("path")
+        .attr("d", d3.geoPath().projection(d3.geoIdentity()
+            .fitSize([width, height], contours[0])))
+        //.attr("stroke","royalblue")
+        .attr("stroke", d => color(d.value))
+        .attr("fill","none")
+        .attr("class", "probability")
+        .attr("stroke-width","1");
+    }
+
+    //main?
+    const axis = () => {
+        svg.append("g")
+        .attr("transform", `translate(0, ${height})`)
+        .call(d3.axisBottom(xaxis));
+        svg.append("g")
+        .call(d3.axisLeft(yaxis));
+    };
+    axis();
+
+    let data;
+    const reroll = () => {
+        svg.selectAll(".sample").remove();
+        const mu = [[-2, 2], [ 2, -2]];
+        const sigma = [[1.5, 1.5, 0.5],
+                       [1.5, 1.5, 0.5],
+                ];
+        const num = [100, 100];
+        data = mu.map((m,i) => generate(m, sigma[i], num[i])).reduce((a,b) => a.concat(b));    
+        scatter(data)
+    };
+    d3.select("#Reroll").on("click", reroll);
+    reroll();
+
+    d3.select("svg").on("click", point => {
+        const x = xaxis.invert(point.x - margin.left);
+        const y = yaxis.invert(point.y - margin.top);
+        data = data.concat(generate([x, y], [0.5, 0.5, 0], 20));    
+        scatter(data);
+    });
+
+    let mu, sigma, pi;
+    const init = () => {
+        mu = [[-3, 0], [3, 0]];
+        sigma = [[1, 1, 0],
+                 [1, 1, 0]];
+        pi = [0.5, 0.5];
+        plotContours(mu, sigma, pi);
+    };
+    d3.select("#Initialize").on("click", init);
+    init();
+
+    d3.select("svg").on("contextmenu", point => {
+        point.preventDefault()
+        const x = xaxis.invert(point.x - margin.left);
+        const y = yaxis.invert(point.y - margin.top);
+        mu = mu.concat([[x, y]]);
+        sigma = sigma.concat([[1, 1, 0]]);    
+        pi = pi.concat([1]).fill(1 / mu.length);
+        plotContours(mu, sigma, pi);
+    });
+
+    const EMstep = () => {
+        const respons = expectation(mu, sigma, pi, data);
+        [mu, sigma, pi] = maximization(data, respons);
+        //plotNormal(mu, sigma, pi, [1.177, 2.448, 3.035])
+        plotContours(mu, sigma, pi);
+        console.log(pi)
+    };
+    d3.select("#EMstep").on("click", EMstep);
+    
+    // tooltip for visualizing loglikelihood(when mouseover)
+    const div = d3.select("body")
+    .append("div")
+    .attr("class", "contour_tooltip")
+    .style("font-size", "12px")
+    .style("position", "absolute")
+    .style("text-align", "center")
+    .style("width", "160px")
+    .style("height", "40px")
+    .style("background", "#333")
+    .style("color", "#ddd")
+    .style("padding", "0px")
+    .style("border", "0px")
+    .style("border-radius", "8px")
+    .style("opacity", "0");
+
+    d3.select("svg").on("mouseover", () => {
+        div.transition().duration(400).style("opacity", 0.9);
+        div.style("z-index", "");
+    })
+    .on("mousemove", (point) => {
+        const x = xaxis.invert(point.x - margin.left)
+        const y = yaxis.invert(point.y - margin.top)
+        const nll = Math.log(pi.reduce((sum, pi_i, i) => 
+            sum + pi_i * density(mu[i], sigma[i], [x, y]), 0
+        ));
+
+        div.html(`x = ${x.toFixed(2)} y = ${y.toFixed(2)}<br>LogLikelihood = ${nll.toFixed(2)}`)
+        .style("left", (event.pageX + 20) + "px")
+        .style("top", (event.pageY - 35) + "px");
+    })
+    .on("mouseout", () => {
+        div.transition()
+        .duration(500)
+        .style("opacity", 0);
+    })
+
+    </script>
