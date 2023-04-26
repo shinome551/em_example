@@ -3,4 +3,4 @@
 
 <img src="./sample_image.png" width="640px">
 
-Visualization of optimization by EM algorithm for Gaussian mixture model. It uses [d3.js](https://d3js.org/).
+Visualization of a gaussian mixture model optimization by EM algorithm. It uses [d3.js](https://d3js.org/).
